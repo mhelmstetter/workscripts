@@ -182,11 +182,9 @@ async def throttle_if_necessary(last_time_secs, min_delta_secs):
         secs_to_sleep = min_delta_secs - secs_elapsed_since_last
         await asyncio.sleep(secs_to_sleep)
 
-async def main(args):
-    cluster = Cluster(args.uri, asyncio.get_event_loop())
-    await cluster.check_is_mongos(warn_only=args.dryrun)
 
-    coll = ShardedCollection(cluster, args.ns)
+async def defrag(cluster, coll):
+    
     await coll.init()
 
     ###############################################################################################
@@ -201,7 +199,8 @@ async def main(args):
 
     tags_doc = await cluster.configDb.tags.find_one({'ns': args.ns})
     if tags_doc is not None:
-        raise Exception("There can be no zones associated with the collection to defragment")
+        logging.warn("Tags exist! Only phase1 is supported")
+        #raise Exception("There can be no zones associated with the collection to defragment")
 
     auto_splitter_doc = await cluster.configDb.settings.find_one({'_id': 'autosplit'})
     if not args.dryrun and (auto_splitter_doc is None or auto_splitter_doc['enabled']):
@@ -242,11 +241,11 @@ async def main(args):
                 f"""and an estimated chunk size of {fmt_kb(args.phase_1_estimated_chunk_size_kb)}."""
                 f"""No actual modifications to the cluster will occur.""")
     else:
-        yes_no(
-            f'The next steps will perform an actual merge with target chunk size of {fmt_kb(target_chunk_size_kb)}.'
-        )
+        if not args.yes:
+            yes_no(f'The next steps will perform an actual merge with target chunk size of {fmt_kb(target_chunk_size_kb)}.')
         if args.phase_1_reset_progress:
-            yes_no(f'Previous defragmentation progress will be reset.')
+            if not args.yes:
+                yes_no(f'Previous defragmentation progress will be reset.')
             num_cleared = await coll.clear_chunk_size_estimations()
             logging.info(f'Cleared {num_cleared} already processed chunks.')
 
@@ -987,6 +986,20 @@ async def main(args):
     print(f'Average chunk size: Phase I {fmt_kb(avg_chunk_size_phase_1)} | Phase II {fmt_kb(avg_chunk_size_phase_2)} | Phase III {fmt_kb(avg_chunk_size_phase_3)}')
     print(f"Total moved data: {fmt_kb(total_moved_data_kb)} i.e. {(100 * total_moved_data_kb / total_coll_size_kb):.2f} %")
 
+async def main(args):
+    cluster = Cluster(args.uri, asyncio.get_event_loop())
+    await cluster.check_is_mongos(warn_only=args.dryrun)
+    if (args.ns):
+        coll = ShardedCollection(cluster, args.ns)
+        await defrag(cluster, coll)
+    else:
+        logging.info("Process all namespaces")
+        namespaces = await cluster.configDb.chunks.distinct("ns")
+        for ns in namespaces:
+            print("ns: " + ns)
+            coll = ShardedCollection(cluster, ns)
+            await defrag(cluster, coll)
+
 if __name__ == "__main__":
     argsParser = argparse.ArgumentParser(
         description=help_string)
@@ -1002,8 +1015,12 @@ if __name__ == "__main__":
            depend on certain state of the cluster to have been reached by previous phases, if this
            mode is selected, the script will stop early.""", metavar='target_chunk_size',
         type=lambda x: int(x) * 1024, required=False)
+    argsParser.add_argument(
+        '--yes',
+        help="""Bypass keyboard input prompts""",
+        action='store_true')
     argsParser.add_argument('--ns', help="""The namespace on which to perform defragmentation""",
-                            metavar='ns', type=str, required=True)
+                            metavar='ns', type=str, required=False)
     argsParser.add_argument('--small-chunk-threshold', help="""Threshold for the size of chunks 
         eligable to be moved in Phase II. Fractional value between 0 and 0.5""",
         metavar='fraction', dest='small_chunk_frac', type=float, default=0.25)
