@@ -18,6 +18,7 @@ import pickle
 
 from common import Cluster, yes_no
 from pymongo import errors as pymongo_errors
+from tqdm import tqdm
 
 # Ensure that the caller is using python 3
 if (sys.version_info[0] < 3):
@@ -262,19 +263,19 @@ async def defrag(cluster, coll):
         logging.info('Preperation: Loading chunks into memory')
         assert not shard_to_chunks
         collectionVersion = None
-        
-        async for c in cluster.configDb.chunks.find(coll.chunks_query_filter(), sort=[('min',
-                                                                            pymongo.ASCENDING)]):
-            shard_id = c['shard']
-            if collectionVersion is None:
-                collectionVersion = c['lastmod']
-            if c['lastmod'] > collectionVersion:
-                collectionVersion = c['lastmod']
-            if shard_id not in shard_to_chunks:
-                shard_to_chunks[shard_id] = {'chunks': [], 'num_merges_performed': 0, 'num_moves_performed': 0}
-            shard = shard_to_chunks[shard_id]
-            shard['chunks'].append(c)
-            progress.update()
+        with tqdm(total=num_chunks, unit=' chunk') as progress:
+            async for c in cluster.configDb.chunks.find(coll.chunks_query_filter(), sort=[('min',
+                                                                                pymongo.ASCENDING)]):
+                shard_id = c['shard']
+                if collectionVersion is None:
+                    collectionVersion = c['lastmod']
+                if c['lastmod'] > collectionVersion:
+                    collectionVersion = c['lastmod']
+                if shard_id not in shard_to_chunks:
+                    shard_to_chunks[shard_id] = {'chunks': [], 'num_merges_performed': 0, 'num_moves_performed': 0}
+                shard = shard_to_chunks[shard_id]
+                shard['chunks'].append(c)
+                progress.update()
     
         if not args.dryrun:
             sizes = await coll.data_size_kb_per_shard()
@@ -301,11 +302,12 @@ async def defrag(cluster, coll):
             return
 
         logging.info("Calculating missing chunk size estimations") 
-        tasks = []
-        async for ch in cluster.configDb.chunks.find(missing_size_query):
-            tasks.append(
-                    asyncio.ensure_future(write_size(ch, progress)))
-        await asyncio.gather(*tasks)
+        with tqdm(total=num_chunks_missing_size, unit=' chunks') as progress:
+            tasks = []
+            async for ch in cluster.configDb.chunks.find(missing_size_query):
+                tasks.append(
+                        asyncio.ensure_future(write_size(ch, progress)))
+            await asyncio.gather(*tasks)
 
     # Mirror the config.chunks indexes in memory
     def build_chunk_index():
@@ -601,16 +603,17 @@ async def defrag(cluster, coll):
         logging.info(
             f'Collection version is {collectionVersion} and chunks are spread over {len(shard_to_chunks)} shards'
         )
-    
-        if args.no_parallel_merges or args.phase1_throttle_secs:
-            for s in shard_to_chunks:
-                await merge_chunks_on_shard(s, collectionVersion, progress)
-        else:
-            tasks = []
-            for s in shard_to_chunks:
-                tasks.append(
-                    asyncio.ensure_future(merge_chunks_on_shard(s, collectionVersion, progress)))
-            await asyncio.gather(*tasks)
+        
+        with tqdm(total=num_chunks, unit=' chunk') as progress:
+            if args.no_parallel_merges or args.phase1_throttle_secs:
+                for s in shard_to_chunks:
+                    await merge_chunks_on_shard(s, collectionVersion, progress)
+            else:
+                tasks = []
+                for s in shard_to_chunks:
+                    tasks.append(
+                        asyncio.ensure_future(merge_chunks_on_shard(s, collectionVersion, progress)))
+                await asyncio.gather(*tasks)
     else:
         logging.info("Skipping Phase I")
 
@@ -818,36 +821,36 @@ async def defrag(cluster, coll):
         if not total_chunks_to_process:
             return total_moved_data_kb
 
-        
-        iteration = 0
-        while iteration < 25:
-            iteration += 1
-            progress.write(f"""Phase II: iteration {iteration}. Remainging chunks to process {progress.total - progress.n}, total chunks {len(chunks_id_index)}""")
+        with tqdm(total=total_chunks_to_process, unit=' chunks') as progress:
+            iteration = 0
+            while iteration < 25:
+                iteration += 1
+                progress.write(f"""Phase II: iteration {iteration}. Remainging chunks to process {progress.total - progress.n}, total chunks {len(chunks_id_index)}""")
 
-            moved_data_kb = 0
-            shards_to_process = [s for s in shard_to_chunks]
-            while(shards_to_process):
-                # get the shard with most data
-                shard_id = max(shards_to_process, key=lambda s: total_shard_size[s])
-                moved_data_kb += await move_merge_chunks_by_size(shard_id, progress)
-                shards_to_process.remove(shard_id)
+                moved_data_kb = 0
+                shards_to_process = [s for s in shard_to_chunks]
+                while(shards_to_process):
+                    # get the shard with most data
+                    shard_id = max(shards_to_process, key=lambda s: total_shard_size[s])
+                    moved_data_kb += await move_merge_chunks_by_size(shard_id, progress)
+                    shards_to_process.remove(shard_id)
 
-            total_moved_data_kb += moved_data_kb
-            # update shard_to_chunks
-            for s in shard_to_chunks:
-                shard_to_chunks[s]['chunks'] = []
-            
-            for cid in chunks_id_index:
-                c = chunks_id_index[cid]
-                shard_to_chunks[c['shard']]['chunks'].append(c)
-            
-            num_chunks = len(chunks_id_index)
-            if not args.dryrun:
-                num_chunks_actual = await cluster.configDb.chunks.count_documents(coll.chunks_query_filter())
-                assert(num_chunks_actual == num_chunks)
+                total_moved_data_kb += moved_data_kb
+                # update shard_to_chunks
+                for s in shard_to_chunks:
+                    shard_to_chunks[s]['chunks'] = []
+                
+                for cid in chunks_id_index:
+                    c = chunks_id_index[cid]
+                    shard_to_chunks[c['shard']]['chunks'].append(c)
+                
+                num_chunks = len(chunks_id_index)
+                if not args.dryrun:
+                    num_chunks_actual = await cluster.configDb.chunks.count_documents(coll.chunks_query_filter())
+                    assert(num_chunks_actual == num_chunks)
 
-            if moved_data_kb == 0 or progress.n == progress.total:
-                return total_moved_data_kb
+                if moved_data_kb == 0 or progress.n == progress.total:
+                    return total_moved_data_kb
 
 
     if not shard_to_chunks:
@@ -943,15 +946,16 @@ async def defrag(cluster, coll):
         logging.info(f'Phase III : Splitting oversized chunks')
 
         num_chunks = len(chunks_id_index)
-        tasks = []
-        for s in shard_to_chunks:
-            splits_performed_per_shard[s] = 0;
-            tasks.append(
-                asyncio.ensure_future(split_oversized_chunks(s, progress)))
-            if args.phase3_throttle_secs:
-                await asyncio.gather(*tasks)
-                tasks.clear()
-        await asyncio.gather(*tasks)
+        with tqdm(total=num_chunks, unit=' chunks') as progress:
+            tasks = []
+            for s in shard_to_chunks:
+                splits_performed_per_shard[s] = 0;
+                tasks.append(
+                    asyncio.ensure_future(split_oversized_chunks(s, progress)))
+                if args.phase3_throttle_secs:
+                    await asyncio.gather(*tasks)
+                    tasks.clear()
+            await asyncio.gather(*tasks)
 
     else:
         logging.info("Skipping Phase III")
