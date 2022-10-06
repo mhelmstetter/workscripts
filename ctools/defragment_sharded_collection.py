@@ -497,7 +497,7 @@ async def defrag(cluster, coll):
                 """
                 trust_estimations = consecutive_chunks.trust_batch_estimation and 'defrag_collection_est_size' in c
                 return (trust_estimations and
-                        consecutive_chunks.batch_size_estimation + c['defrag_collection_est_size'] > (target_chunk_size_kb * 1.20))
+                        consecutive_chunks.batch_size_estimation + c['defrag_collection_est_size'] > (target_chunk_size_kb * 1.10))
 
             if consecutive_chunks.batch[-1]['max'] == c['min'] and not will_overflow_target_size():
                 consecutive_chunks.append(c)
@@ -598,22 +598,26 @@ async def defrag(cluster, coll):
         logging.info('Phase I: Merging consecutive chunks on shards')
 
         await load_chunks()
-        assert (len(shard_to_chunks) > 1)
 
-        logging.info(
-            f'Collection version is {collectionVersion} and chunks are spread over {len(shard_to_chunks)} shards'
-        )
-        
-        with tqdm(total=num_chunks, unit=' chunk') as progress:
-            if args.no_parallel_merges or args.phase1_throttle_secs:
-                for s in shard_to_chunks:
-                    await merge_chunks_on_shard(s, collectionVersion, progress)
-            else:
-                tasks = []
-                for s in shard_to_chunks:
-                    tasks.append(
-                        asyncio.ensure_future(merge_chunks_on_shard(s, collectionVersion, progress)))
-                await asyncio.gather(*tasks)
+        if len(shard_to_chunks) > 1:
+            logging.info(
+                f'Collection version is {collectionVersion} and chunks are spread over {len(shard_to_chunks)} shards'
+            )
+            
+            with tqdm(total=num_chunks, unit=' chunk') as progress:
+                if args.no_parallel_merges or args.phase1_throttle_secs:
+                    for s in shard_to_chunks:
+                        await merge_chunks_on_shard(s, collectionVersion, progress)
+                else:
+                    tasks = []
+                    for s in shard_to_chunks:
+                        tasks.append(
+                            asyncio.ensure_future(merge_chunks_on_shard(s, collectionVersion, progress)))
+                    await asyncio.gather(*tasks)
+        else:
+            logging.info(
+                f'Skipping defrag -- chunks are spread over {len(shard_to_chunks)} shards'
+            )
     else:
         logging.info("Skipping Phase I")
 
