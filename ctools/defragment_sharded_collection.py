@@ -1000,7 +1000,11 @@ async def main(args):
         logging.info("Process all namespaces")
         namespaces = await cluster.configDb.chunks.distinct("ns")
         for ns in namespaces:
-            print("ns: " + ns)
+            if ns == "config.system.sessions":
+                print("skipping ns: " + ns)
+                continue
+            else:
+                print("ns: " + ns)
             coll = ShardedCollection(cluster, ns)
             await defrag(cluster, coll)
 
