@@ -599,7 +599,7 @@ async def defrag(cluster, coll):
 
         await load_chunks()
 
-        if len(shard_to_chunks) > 1:
+        if len(shard_to_chunks) > 0:
             logging.info(
                 f'Collection version is {collectionVersion} and chunks are spread over {len(shard_to_chunks)} shards'
             )
